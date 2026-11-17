@@ -41,7 +41,8 @@ namespace Telemetria2
         private System.Windows.Forms.Timer uiTimer;
 
         private HttpListener httpListener;
-        private CancellationTokenSource cts;
+        private Thread serverThread;
+        private volatile bool running = false;
         private const int Port = 25555;
 
         // Colores Identidad Argentina
@@ -89,13 +90,11 @@ namespace Telemetria2
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
-            // Marco exterior celeste
             using (Pen penCeleste = new Pen(ColorCeleste, 3))
             {
                 g.DrawRectangle(penCeleste, 8, 8, this.ClientSize.Width - 17, this.ClientSize.Height - 17);
             }
 
-            // Fileteado interior dorado fino
             using (Pen penDorado = new Pen(ColorDorado, 1))
             {
                 g.DrawRectangle(penDorado, 14, 14, this.ClientSize.Width - 29, this.ClientSize.Height - 29);
@@ -240,65 +239,75 @@ namespace Telemetria2
 
         private void IniciarServidorWeb()
         {
-            cts = new CancellationTokenSource();
-            Task.Run(async () =>
+            running = true;
+            serverThread = new Thread(() =>
             {
                 try
                 {
                     httpListener = new HttpListener();
-                    httpListener.Prefixes.Add($"http://*:{Port}/");
-                    httpListener.Start();
-                }
-                catch
-                {
-                    // Fallback si Windows bloquea '*' sin permisos de administrador
-                    httpListener = new HttpListener();
                     httpListener.Prefixes.Add($"http://localhost:{Port}/");
                     httpListener.Prefixes.Add($"http://127.0.0.1:{Port}/");
-                    httpListener.Start();
-                }
-
-                while (!cts.Token.IsCancellationRequested)
-                {
-                    try
+                    
+                    // Intentar agregar IP local si es posible
+                    if (cmbInterfaces.SelectedItem is NetItem item && item.Ip != "127.0.0.1")
                     {
-                        var ctx = await httpListener.GetContextAsync();
-                        _ = Task.Run(() => ProcesarPeticion(ctx));
+                        try { httpListener.Prefixes.Add($"http://{item.Ip}:{Port}/"); } catch { }
                     }
-                    catch { }
+
+                    httpListener.Start();
+
+                    while (running && httpListener.IsListening)
+                    {
+                        try
+                        {
+                            var ctx = httpListener.GetContext();
+                            ProcesarPeticion(ctx);
+                        }
+                        catch
+                        {
+                            if (!running) break;
+                        }
+                    }
                 }
-            }, cts.Token);
+                catch { }
+            })
+            { IsBackground = true };
+            serverThread.Start();
         }
 
         private void ProcesarPeticion(HttpListenerContext ctx)
         {
-            string path = ctx.Request.Url.AbsolutePath.ToLowerInvariant();
-            ctx.Response.Headers.Add("Access-Control-Allow-Origin", "*");
+            try
+            {
+                string path = ctx.Request.Url.AbsolutePath.ToLowerInvariant();
+                ctx.Response.Headers.Add("Access-Control-Allow-Origin", "*");
 
-            byte[] buffer;
-            if (path == "/api/ets2/telemetry")
-            {
-                ctx.Response.ContentType = "application/json; charset=utf-8";
-                string json = TelemetryReader.GetTelemetryJson();
-                buffer = Encoding.UTF8.GetBytes(json);
-            }
-            else
-            {
-                ctx.Response.ContentType = "text/html; charset=utf-8";
-                buffer = Encoding.UTF8.GetBytes(DashboardHtml.GetHtml());
-            }
+                byte[] buffer;
+                if (path == "/api/ets2/telemetry")
+                {
+                    ctx.Response.ContentType = "application/json; charset=utf-8";
+                    string json = TelemetryReader.GetTelemetryJson();
+                    buffer = Encoding.UTF8.GetBytes(json);
+                }
+                else
+                {
+                    ctx.Response.ContentType = "text/html; charset=utf-8";
+                    buffer = Encoding.UTF8.GetBytes(DashboardHtml.GetHtml());
+                }
 
-            ctx.Response.ContentLength64 = buffer.Length;
-            using (var output = ctx.Response.OutputStream)
-            {
-                output.Write(buffer, 0, buffer.Length);
+                ctx.Response.ContentLength64 = buffer.Length;
+                using (var output = ctx.Response.OutputStream)
+                {
+                    output.Write(buffer, 0, buffer.Length);
+                }
             }
+            catch { }
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            cts?.Cancel();
-            httpListener?.Stop();
+            running = false;
+            try { httpListener?.Stop(); } catch { }
             trayIcon.Visible = false;
             base.OnFormClosing(e);
         }
@@ -311,7 +320,6 @@ namespace Telemetria2
         }
     }
 
-    // Lector directo de memoria compartida del plugin de ETS2/ATS
     public static class TelemetryReader
     {
         private static readonly string[] MapNames = { "Local\\Ets2TelemetryServer", "Local\\SimTelemetryETS2" };
@@ -343,9 +351,8 @@ namespace Telemetria2
                     using var mmf = MemoryMappedFile.OpenExisting(name, MemoryMappedFileRights.Read);
                     using var accessor = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
 
-                    // Lectura de estructura estándar Funbit / SCS SDK
                     bool paused = accessor.ReadBoolean(4);
-                    float speed = accessor.ReadSingle(48); // m/s
+                    float speed = accessor.ReadSingle(48);
                     float engineRpm = accessor.ReadSingle(60);
                     float engineRpmMax = accessor.ReadSingle(64);
                     int gear = accessor.ReadInt32(68);
@@ -415,7 +422,6 @@ namespace Telemetria2
         }
     }
 
-    // Tablero Web integrado en Celeste, Blanco y Fileteado Porteño
     public static class DashboardHtml
     {
         public static string GetHtml() => @"<!DOCTYPE html>
