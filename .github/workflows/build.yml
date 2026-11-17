@@ -1,0 +1,28 @@
+name: Compilar Telemetria 2.0 EXE
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Descargar codigo
+      uses: actions/checkout@v4
+
+    - name: Configurar .NET 8
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Compilar EXE Portable
+      run: dotnet publish Telemetria2.csproj -c Release -o ./release
+
+    - name: Subir EXE listo para descargar
+      uses: actions/upload-artifact@v4
+      with:
+        name: Telemetria2.0-Portable
+        path: ./release/Telemetria2.0.exe
